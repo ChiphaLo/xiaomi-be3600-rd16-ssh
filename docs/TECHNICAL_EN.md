@@ -23,11 +23,11 @@ POST /cgi-bin/luci/;stok=$TOK/api/xqsmarthome/request_smartcontroller
 POST same endpoint {"command":"scene_start","id":<id>} -> executes
 ```
 
-`payload` is a **string-typed** inner JSON object (double-escaped).
+`payload` is a **string-typed** inner JSON object (double-escaped). The login body is form-encoded field by field so `&` / `+` in the password survive.
 
 ## Why bare telnetd fails
 
-busybox carries `bdata get telnet_en` / `nvram get telnet_en` checks — `telnetd` exits immediately and never binds. The official `set_telnet` API is gated behind the `apps.telnet` feature flag (not registered on release builds). inetd skips the check entirely and hands out `/bin/sh`.
+busybox carries `bdata get telnet_en` / `nvram get telnet_en` checks — `telnetd` exits immediately and never binds. The official `set_telnet` API is gated behind the `apps.telnet` feature flag (not registered on release builds). inetd skips the check and hands out `/bin/sh` — but it is a **debug-only** channel and is removed once SSH is up (below).
 
 ## Persistence model
 
@@ -35,13 +35,15 @@ busybox carries `bdata get telnet_en` / `nvram get telnet_en` checks — `telnet
 - `/etc/crontabs`, `/etc/config` = bind mounts onto `/dev/mapper/sec_cfg` (ext4) → persistent
 - `/data` (UBIFS) → persistent; hosts the host key, `persist.sh`, `authorized_keys`
 - `* * * * * sh /data/persist.sh` in `/etc/crontabs/root` self-heals within a minute of every boot
+- persist.sh resurrects **dropbear only** — inetd never goes into the watchdog or onto /data
 
-## Dropbear path (alternative to inetd)
+## Dropbear (key auth only)
 
 1. `rm /etc/dropbear/dropbear_rsa_host_key` (must delete the 0-byte placeholder first — `dropbearkey` refuses `File exists`)
 2. `dropbearkey -t rsa -f /data/dropbear_rsa_host_key` (~1 min — RSA-2048 is slow on this SoC)
-3. `dropbear -r /data/dropbear_rsa_host_key -B` → SSH live
+3. `dropbear -s -r /data/dropbear_rsa_host_key` → key auth only; **no `-B`** (blank passwords) and no password logins
 4. `authorized_keys` lives at `/etc/dropbear/authorized_keys` (runtime-effective; persist.sh restores it)
+5. Cleanup: `kill` every `pgrep -x inetd` pid + `rm /etc/inetd.conf`, run only after :22 answers with a banner
 
 ## Dead ends / unverified
 
