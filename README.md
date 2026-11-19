@@ -49,7 +49,7 @@ dropbear + authorized_keys ────► :22 SSH（密钥/密码均可用）
 | 数字结尾碎片 | `echo -n ..D>/tmp/N`（D 为数字）被解析成 `D>` fd 重定向、文件写空——需在 `>` 前补空格（`..D >/tmp/N`） |
 | 可写区域 | `/etc` ramfs 重启全清；`/data`、`/etc/crontabs`（sec_cfg）、`/etc/config` 持久 |
 
-## 懒人单命令（免克隆，全自动）
+## 懒人命令（免克隆，全自动）
 
 macOS / Linux（需 `python3` + `curl`）：
 
