@@ -23,11 +23,11 @@ POST /cgi-bin/luci/;stok=$TOK/api/xqsmarthome/request_smartcontroller
 POST 同上 {"command":"scene_start","id":<id>} -> 执行
 ```
 
-`payload` 是**字符串形式**的内层 JSON（需要二次转义）。
+`payload` 是**字符串形式**的内层 JSON（需要二次转义）。登录 body 逐字段做 form 编码，密码里的 `&`、`+` 才不会截断。
 
 ## 为什么直接 telnetd 不行
 
-busybox 里有 `bdata get telnet_en` / `nvram get telnet_en` 检查——裸 `telnetd` 进程秒退、不绑端口。LuCI 的 `set_telnet` 接口又被 `apps.telnet` 特性开关挡住（release 分支不注册）。绕过：inetd 不查 telnet_en，直接给 `/bin/sh`。
+busybox 里有 `bdata get telnet_en` / `nvram get telnet_en` 检查——裸 `telnetd` 进程秒退、不绑端口。LuCI 的 `set_telnet` 接口又被 `apps.telnet` 特性开关挡住（release 分支不注册）。绕过：inetd 不查 telnet_en，直接给 `/bin/sh`——但它只是**临时调试通道**，落地 SSH 后要移除（见下）。
 
 ## 持久化模型
 
@@ -35,13 +35,15 @@ busybox 里有 `bdata get telnet_en` / `nvram get telnet_en` 检查——裸 `te
 - `/etc/crontabs`、`/etc/config` 绑到 sec_cfg ext4 → 持久
 - `/data`（UBIFS）→ 持久，放 hostkey / persist.sh / authorized_keys
 - `/etc/crontabs/root` 末尾加 `* * * * * sh /data/persist.sh` → 每分钟自愈
+- persist.sh 只负责恢复 **dropbear**；inetd 不进看门狗、不拷到 /data
 
-## 备选：dropbear 而不是 inetd
+## dropbear（仅密钥）
 
 1. `rm /etc/dropbear/dropbear_rsa_host_key`（0 字节占位文件必须删掉，否则 keygen 报 File exists）
 2. `dropbearkey -t rsa -f /data/dropbear_rsa_host_key`（~1 分钟，IPQ5312 上 RSA-2048 慢）
-3. `dropbear -r /data/dropbear_rsa_host_key -B` → ssh 通
+3. `dropbear -s -r /data/dropbear_rsa_host_key` → SSH 仅密钥认证；**禁用 `-B`**（空密码）与密码登录
 4. `authorized_keys` 放 `/etc/dropbear/authorized_keys`（运行期有效，persist.sh 每次恢复）
+5. 收尾：`pgrep -x inetd` 逐个 kill + `rm /etc/inetd.conf`——确认 :22 banner 可达后执行
 
 ## 其他未走通/未验证
 
