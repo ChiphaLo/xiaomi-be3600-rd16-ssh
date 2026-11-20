@@ -39,15 +39,21 @@ busybox 里有 `bdata get telnet_en` / `nvram get telnet_en` 检查——裸 `te
 - 纯数字参数紧跟 `>`/`>>` 会被解释成 fd 重定向（`2>`、`2>>`）——必须 `D >>` 补空格；混合字符（`aa2`）不受此限制（io_number 要求整个词都是数字）
 - 行中 `空格+数字`（`A D`）没有 ≤18 字符的合法写法，写入器抛 `ValueError`；`>` 无法出现在脚本内容里
 
-`run_cmd()` 对每条命令做长度与禁用字符硬检查。
+`run_cmd()` 对每条命令做长度、禁用字符与控制字符/非 ASCII 硬检查；`run_checked()` 逐步核对注入结果，可验证失败即中止并报告步骤号。
 
 ## SSH 验证
 
-banner / 端口监听只证明有服务在答，不能证明公钥登录可用。`--privkey` 时用本机 `ssh -i <key> -o BatchMode=yes root@ip id` 实测（返回 `uid=0` 才算过）；没给 `--privkey` 则交互确认后才关 inetd。验证不通过时 :23 保留。
+banner / 端口监听只证明有服务在答，不能证明公钥登录可用。`--privkey` 时做**双向真实验证**：
+
+- 设备侧：用 `dropbearkey -y` 导出 `/data` host key 公钥，写成本机 known_hosts，`StrictHostKeyChecking=yes` 校验服务器身份
+- 本机侧：`ssh-keygen -y` 从 `--privkey` 导出公钥并与 `--pubkey` 逐字段比对（类型+ blob），不一致直接拒绝
+- `ssh` 调用带 `-F /dev/null` + `IdentitiesOnly=yes`：只用指定私钥，不吃 ssh-agent 里的其它密钥
+
+三者（登录成功 + host key 匹配 + 私钥配对）同时成立才关 inetd。没给 `--privkey` 则改为人工确认——**只有空回车**算确认通过，其余输入一律保留 :23。
 
 ## 防火墙（--allow-cidr）
 
-独立链 `RD16_SSH`（`-N` 建链、`-F` 清链、`ACCEPT CIDR` → `DROP`），`INPUT` 里用 `-I` 置顶跳转规则——无论链里原有哪条通用 ACCEPT，:22 流量都先过这条链。CIDR 由 `ipaddress.ip_network` 校验后才进脚本；不写 `--allow-cidr` 则不加任何规则。
+独立链 `RD16_SSH`，规则采用**无窗口切换**：先在 `RD16_NEW` 上把整套规则建好，`-I INPUT 1` 置顶跳转指向新链，再删旧跳转、清旧链，最后 `-E` 改回 `RD16_SSH` 名——正在使用的链永不在引用状态下被清空，且跳转永远位于 INPUT 第一位（`iptables -C` 只看存在不看位置，所以每次强制重插）。CIDR 由 `ipaddress.ip_network` 校验且**只接受 IPv4**（iptables 不处理 IPv6）；不写 `--allow-cidr` 则不加任何规则。
 
 ## 持久化模型
 
@@ -56,11 +62,12 @@ banner / 端口监听只证明有服务在答，不能证明公钥登录可用�
 - `/data`（UBIFS）→ 持久，放 hostkey / persist.sh / authorized_keys
 - `/etc/crontabs/root` 末尾加 `* * * * * sh /data/persist.sh` → 每分钟自愈
 - persist.sh 只负责恢复 **dropbear**；inetd 不进看门狗、不拷到 /data
+- dropbear 进程识别用 `/proc/<pid>/cmdline` 匹配自家 host key 路径——别的 dropbear 实例不算数；启动失败经 `logger` 写 syslog
 
 ## dropbear（仅密钥）
 
 1. `rm /etc/dropbear/dropbear_rsa_host_key`（0 字节占位文件必须删掉，否则 keygen 报 File exists）
-2. `dropbearkey -t rsa -f /data/dropbear_rsa_host_key`（~1 分钟，IPQ5312 上 RSA-2048 慢）
+2. `dropbearkey -y -f /data/dropbear_rsa_host_key` 校验现有 key；损坏先 `rm` 再 `dropbearkey -t rsa -f` 重建（~1 分钟，IPQ5312 上 RSA-2048 慢）——否则旧文件挡住 keygen
 3. `dropbear -s -r /data/dropbear_rsa_host_key` → SSH 仅密钥认证；**禁用 `-B`**（空密码）与密码登录
 4. `authorized_keys` 放 `/etc/dropbear/authorized_keys`（运行期有效，persist.sh 每次恢复）
 5. 收尾：`pgrep -x inetd` 逐个 kill + `rm /etc/inetd.conf`——先实测 `ssh -i 私钥 root@ip id` 返回 `uid=0` 再执行（banner 可达不算验证通过）
