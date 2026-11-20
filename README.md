@@ -67,8 +67,8 @@ irm -OutFile $env:TEMP\rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi
 
 - `--stage persist` = 全自动：注入 → 临时 inetd（:23）→ 写入密钥 + dropbear（:22，`-s` 仅密钥）→ **真实 SSH 登录验证通过**后移除 inetd → `/data` + cron 看门狗自愈
 - `--pubkey` **必填**：SSH 只做密钥认证，密码登录整路关闭（不再有 `-B` 空密码）
-- 追加 `--privkey 私钥路径` 用本机 `ssh` 做一次真实登录验证；不给则改为人工确认后才关 :23
-- 追加 `--allow-cidr 192.168.31.0/24` 走独立链 `RD16_SSH`（跳转规则置顶），把 :22 限到该网段
+- 追加 `--privkey 私钥路径` 做**双向验证**：比对私钥公钥配对 + 用设备 host key 建 known_hosts 实登一次；不给则人工确认（仅空回车算通过）
+- 追加 `--allow-cidr 192.168.31.0/24` 走独立链 `RD16_SSH`（新链先建、跳转置顶、旧链后删的无窗口切换，仅 IPv4）
 - `--password` 不传会交互式询问，密码不进 shell 历史和进程列表
 - 只要临时调试 shell：`--stage persist` 换成 `--stage shell`，完成后 `nc 192.168.31.1 23`（重启即消失，不写持久配置）
 
@@ -229,14 +229,17 @@ for p in $(pgrep -x inetd); do kill $p; done
 rm -f /etc/inetd.conf
 ```
 
-可选：把 SSH 限到管理网段（独立链 + 置顶跳转，规则顺序不受既有 ACCEPT 影响；写进 persist.sh 一起自愈）：
+可选：把 SSH 限到管理网段（独立链 + 置顶跳转 + 无窗口切换；写进 persist.sh 一起自愈）：
 
 ```sh
-iptables -N RD16_SSH 2>/dev/null
-iptables -F RD16_SSH
-iptables -A RD16_SSH -s 192.168.31.0/24 -j ACCEPT
-iptables -A RD16_SSH -j DROP
-iptables -I INPUT -p tcp --dport 22 -j RD16_SSH
+iptables -N RD16_NEW 2>/dev/null; iptables -F RD16_NEW
+iptables -A RD16_NEW -s 192.168.31.0/24 -j ACCEPT
+iptables -A RD16_NEW -j DROP
+iptables -D INPUT -p tcp --dport 22 -j RD16_NEW 2>/dev/null
+iptables -D INPUT -p tcp --dport 22 -j RD16_SSH 2>/dev/null
+iptables -I INPUT 1 -p tcp --dport 22 -j RD16_NEW
+iptables -F RD16_SSH 2>/dev/null; iptables -X RD16_SSH 2>/dev/null
+iptables -E RD16_NEW RD16_SSH 2>/dev/null
 ```
 
 重启后 ~1 分钟 dropbear 自动恢复，而 inetd 不会回来。
