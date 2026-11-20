@@ -39,15 +39,21 @@ Every injected command is ≤18 chars and appends straight to the target file �
 - all-digit args directly before `>`/`>>` parse as fd redirection (`2>`, `2>>`) — pad with `D >>`; mixed args (`aa2`) are immune because io_number only matches whole-word digits
 - `space+digit` (`A D`) mid-line has no legal ≤18-char emission — the writer raises `ValueError`; `>` can never appear inside content
 
-`run_cmd()` hard-checks every command for length and banned characters.
+`run_cmd()` hard-checks every command for length, banned characters, and control/non-ASCII bytes; `run_checked()` verifies each injection result and aborts with the failing step number.
 
 ## SSH verification
 
-A banner or listening port only proves something answered — not that pubkey login works. With `--privkey`, the tool runs a real `ssh -i <key> -o BatchMode=yes root@ip id` and requires `uid=0`; without it, interactive confirmation gates the inetd teardown. On failure :23 stays up.
+A banner or listening port only proves something answered — not that pubkey login works. With `--privkey` the check is **bidirectional and real**:
+
+- device side: `dropbearkey -y` exports the `/data` host key's public part into a local known_hosts file, verified with `StrictHostKeyChecking=yes`
+- local side: `ssh-keygen -y` derives the pubkey from `--privkey` and compares type + blob with `--pubkey`; a mismatch refuses outright
+- the ssh call uses `-F /dev/null` + `IdentitiesOnly=yes`: only the given key is offered — ssh-agent keys cannot shortcut the check
+
+inetd is only removed when login succeeds AND host key matches AND the key pair matches. Without `--privkey`, manual confirmation gates it — **only a bare Enter counts**, any other input keeps :23.
 
 ## Firewall (--allow-cidr)
 
-Dedicated chain `RD16_SSH` (`-N` create, `-F` flush, `ACCEPT <cidr>` → `DROP`), plus an `-I` jump rule pinned to the top of INPUT — :22 traffic always traverses our chain first regardless of earlier generic ACCEPTs. The CIDR is validated by `ipaddress.ip_network` before reaching the script; without the flag nothing is installed.
+Dedicated chain `RD16_SSH` with a **windowless swap**: the full ruleset is built on `RD16_NEW` first, a top-pinned jump (`-I INPUT 1`) points at it, the old jump is removed and the old chain flushed and deleted, then `-E` renames it back — the referenced chain is never flushed in place, and the jump always lands at INPUT position 1 (`iptables -C` checks existence, not position, so the jump is forcefully re-inserted every run). The CIDR is validated by `ipaddress.ip_network` and **must be IPv4** (iptables does not handle IPv6); without the flag nothing is installed.
 
 ## Persistence model
 
@@ -56,11 +62,12 @@ Dedicated chain `RD16_SSH` (`-N` create, `-F` flush, `ACCEPT <cidr>` → `DROP`)
 - `/data` (UBIFS) → persistent; hosts the host key, `persist.sh`, `authorized_keys`
 - `* * * * * sh /data/persist.sh` in `/etc/crontabs/root` self-heals within a minute of every boot
 - persist.sh resurrects **dropbear only** — inetd never goes into the watchdog or onto /data
+- dropbear instances are matched by `/proc/<pid>/cmdline` for our key path — an unrelated dropbear does not count as "ours is running"; a failed start goes to syslog via `logger`
 
 ## Dropbear (key auth only)
 
 1. `rm /etc/dropbear/dropbear_rsa_host_key` (must delete the 0-byte placeholder first — `dropbearkey` refuses `File exists`)
-2. `dropbearkey -t rsa -f /data/dropbear_rsa_host_key` (~1 min — RSA-2048 is slow on this SoC)
+2. `dropbearkey -y -f /data/dropbear_rsa_host_key` validates the existing key; on corruption `rm` it first, then `dropbearkey -t rsa -f` rebuilds (~1 min — RSA-2048 is slow on this SoC) — a stale file otherwise blocks keygen
 3. `dropbear -s -r /data/dropbear_rsa_host_key` → key auth only; **no `-B`** (blank passwords) and no password logins
 4. `authorized_keys` lives at `/etc/dropbear/authorized_keys` (runtime-effective; persist.sh restores it)
 5. Cleanup: `kill` every `pgrep -x inetd` pid + `rm /etc/inetd.conf` — only after `ssh -i <key> root@<ip> id` returns `uid=0` (a banner alone is not verification)
