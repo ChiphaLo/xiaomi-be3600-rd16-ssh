@@ -67,8 +67,8 @@ irm -OutFile $env:TEMP\rd16.py https://raw.githubusercontent.com/ChiphaLo/xiaomi
 
 - `--stage persist` does everything: injection → temporary inetd (:23) → install key + dropbear (:22, `-s` key-only) → **verify a real SSH login** → remove inetd → `/data` + cron watchdog
 - `--pubkey` is **required**: SSH accepts keys only; password auth is off (no `-B` blank-password flag)
-- optional `--privkey <path>` runs a real `ssh` login check before removing :23; without it you confirm manually
-- optional `--allow-cidr 192.168.31.0/24` restricts :22 via a dedicated `RD16_SSH` chain (jump rule pinned to the top of INPUT)
+- optional `--privkey <path>` performs a **bidirectional** check: privkey↔pubkey match + real login against a known_hosts built from the device's host key; without it, manual confirmation (only a bare Enter counts)
+- optional `--allow-cidr 192.168.31.0/24` restricts :22 via a dedicated `RD16_SSH` chain (new chain first, top-pinned jump, old chain deleted last — no window; IPv4 only)
 - omit `--password` for an interactive prompt so the password stays out of shell history and the process list
 - debug shell only: swap `--stage persist` for `--stage shell`, then `nc 192.168.31.1 23` (gone after reboot, nothing persisted)
 
@@ -221,14 +221,17 @@ for p in $(pgrep -x inetd); do kill $p; done
 rm -f /etc/inetd.conf
 ```
 
-Optional: restrict SSH to the management subnet (dedicated chain + top-pinned jump rule, immune to earlier generic ACCEPTs; fold into persist.sh so it self-heals):
+Optional: restrict SSH to the management subnet (dedicated chain + top-pinned jump + windowless swap; fold into persist.sh so it self-heals):
 
 ```sh
-iptables -N RD16_SSH 2>/dev/null
-iptables -F RD16_SSH
-iptables -A RD16_SSH -s 192.168.31.0/24 -j ACCEPT
-iptables -A RD16_SSH -j DROP
-iptables -I INPUT -p tcp --dport 22 -j RD16_SSH
+iptables -N RD16_NEW 2>/dev/null; iptables -F RD16_NEW
+iptables -A RD16_NEW -s 192.168.31.0/24 -j ACCEPT
+iptables -A RD16_NEW -j DROP
+iptables -D INPUT -p tcp --dport 22 -j RD16_NEW 2>/dev/null
+iptables -D INPUT -p tcp --dport 22 -j RD16_SSH 2>/dev/null
+iptables -I INPUT 1 -p tcp --dport 22 -j RD16_NEW
+iptables -F RD16_SSH 2>/dev/null; iptables -X RD16_SSH 2>/dev/null
+iptables -E RD16_NEW RD16_SSH 2>/dev/null
 ```
 
 After reboot, dropbear returns within ~1 minute — inetd does not.
