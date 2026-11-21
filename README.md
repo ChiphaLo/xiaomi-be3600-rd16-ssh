@@ -213,9 +213,14 @@ cp /data/authorized_keys /etc/dropbear/authorized_keys
 ```sh
 #!/bin/sh
 mkdir -p /etc/dropbear
-cp /data/authorized_keys /etc/dropbear/authorized_keys 2>/dev/null
-pidof dropbear >/dev/null 2>&1 || \
-    /usr/sbin/dropbear -s -r /data/dropbear_rsa_host_key
+cmp -s /data/authorized_keys /etc/dropbear/authorized_keys || \
+    cp /data/authorized_keys /etc/dropbear/authorized_keys 2>/dev/null
+for p in $(pidof dropbear); do
+    grep -q dropbear_rsa_host_key /proc/$p/cmdline && { rm -f /tmp/rd16_df; exit 0; }
+done
+/usr/sbin/dropbear -s -r /data/dropbear_rsa_host_key && { rm -f /tmp/rd16_df; exit 0; }
+[ -f /tmp/rd16_df ] || { logger -t rd16 'dropbear start failed'; touch /tmp/rd16_df; }
+exit 0
 ```
 
 `/etc/crontabs/root` 加一行（该文件在 sec_cfg 上，重启不掉）：
@@ -244,7 +249,7 @@ iptables -F RD16_SSH 2>/dev/null; iptables -X RD16_SSH 2>/dev/null
 iptables -E RD16_NEW RD16_SSH 2>/dev/null
 ```
 
-重启后 ~1 分钟 dropbear 自动恢复，而 inetd 不会回来。
+重启后 ~1 分钟 dropbear 自动恢复，而 inetd 不会回来。看门狗每分钟跑一次：`cmp -s` 保证 authorized_keys 只在变化时写入；dropbear 启动失败只在每次故障首次记一条 syslog（`/tmp/rd16_df` 标记位）。
 
 ## 涉及文件
 

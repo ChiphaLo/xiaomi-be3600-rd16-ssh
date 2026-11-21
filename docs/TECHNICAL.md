@@ -62,7 +62,7 @@ banner / 端口监听只证明有服务在答，不能证明公钥登录可用�
 - `/etc/crontabs`、`/etc/config` 绑到 sec_cfg ext4 → 持久
 - `/data`（UBIFS）→ 持久，放 hostkey / persist.sh / authorized_keys
 - `/etc/crontabs/root` 末尾加 `* * * * * sh /data/persist.sh` → 每分钟自愈
-- persist.sh 只负责恢复 **dropbear**；inetd 不进看门狗、不拷到 /data
+- persist.sh 只负责恢复 **dropbear**；inetd 不进看门狗、不拷到 /data。写操作设上限：authorized_keys `cmp -s` 变化才写；启动失败经 `/tmp/rd16_df` 标记位每次故障只记一条 syslog。cron 行在 md5 校验通过后才注册
 - dropbear 进程识别用 `/proc/<pid>/cmdline` 匹配自家 host key 路径——别的 dropbear 实例不算数；启动失败经 `logger` 写 syslog
 
 ## dropbear（仅密钥）

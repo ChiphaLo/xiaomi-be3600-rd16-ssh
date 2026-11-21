@@ -62,7 +62,7 @@ Dedicated chain `RD16_SSH` with a **windowless swap**: the full ruleset is built
 - `/etc/crontabs`, `/etc/config` = bind mounts onto `/dev/mapper/sec_cfg` (ext4) → persistent
 - `/data` (UBIFS) → persistent; hosts the host key, `persist.sh`, `authorized_keys`
 - `* * * * * sh /data/persist.sh` in `/etc/crontabs/root` self-heals within a minute of every boot
-- persist.sh resurrects **dropbear only** — inetd never goes into the watchdog or onto /data
+- persist.sh resurrects **dropbear only** — inetd never goes into the watchdog or onto /data. Writes are bounded: authorized_keys is copied only when changed (`cmp -s`), and a failed start is logged once per outage via the `/tmp/rd16_df` flag. The cron entry is registered only after the md5 check passes
 - dropbear instances are matched by `/proc/<pid>/cmdline` for our key path — an unrelated dropbear does not count as "ours is running"; a failed start goes to syslog via `logger`
 
 ## Dropbear (key auth only)

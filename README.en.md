@@ -205,9 +205,14 @@ cp /data/authorized_keys /etc/dropbear/authorized_keys
 ```sh
 #!/bin/sh
 mkdir -p /etc/dropbear
-cp /data/authorized_keys /etc/dropbear/authorized_keys 2>/dev/null
-pidof dropbear >/dev/null 2>&1 || \
-    /usr/sbin/dropbear -s -r /data/dropbear_rsa_host_key
+cmp -s /data/authorized_keys /etc/dropbear/authorized_keys || \
+    cp /data/authorized_keys /etc/dropbear/authorized_keys 2>/dev/null
+for p in $(pidof dropbear); do
+    grep -q dropbear_rsa_host_key /proc/$p/cmdline && { rm -f /tmp/rd16_df; exit 0; }
+done
+/usr/sbin/dropbear -s -r /data/dropbear_rsa_host_key && { rm -f /tmp/rd16_df; exit 0; }
+[ -f /tmp/rd16_df ] || { logger -t rd16 'dropbear start failed'; touch /tmp/rd16_df; }
+exit 0
 ```
 
 Append to `/etc/crontabs/root` (persistent via sec_cfg):
@@ -236,7 +241,7 @@ iptables -F RD16_SSH 2>/dev/null; iptables -X RD16_SSH 2>/dev/null
 iptables -E RD16_NEW RD16_SSH 2>/dev/null
 ```
 
-After reboot, dropbear returns within ~1 minute — inetd does not.
+After reboot, dropbear returns within ~1 minute — inetd does not. The watchdog runs every minute: `cmp -s` means authorized_keys is only rewritten when it actually changed, and a failed dropbear start is logged once per outage (`/tmp/rd16_df` flag), not once per minute.
 
 ## Files
 
