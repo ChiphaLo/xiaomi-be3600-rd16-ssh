@@ -21,6 +21,7 @@ POST /cgi-bin/luci/;stok=$TOK/api/xqsmarthome/request_smartcontroller
                      "payload":"{\"command\":\"wan_block\",\"mac\":\"AA\n<CMD>\n\"}"}]}
     -> daemon 保存场景并回 id
 POST 同上 {"command":"scene_start","id":<id>} -> 执行
+POST 同上 {"command":"scene_delete","id":<id>} -> 删除场景（必须做：scene_setting 会把记录持久化到 /etc/smartcontroller/SmartTask.sc，sec_cfg 仅 ~6MB；反复注入会写满分区。全部清掉用 reset_scenes）
 ```
 
 `payload` 是**字符串形式**的内层 JSON（需要二次转义）。登录 body 逐字段做 form 编码，密码里的 `&`、`+` 才不会截断。
@@ -70,7 +71,7 @@ banner / 端口监听只证明有服务在答，不能证明公钥登录可用�
 2. `dropbearkey -y -f /data/dropbear_rsa_host_key` 校验现有 key；损坏先 `rm` 再 `dropbearkey -t rsa -f` 重建（~1 分钟，IPQ5312 上 RSA-2048 慢）——否则旧文件挡住 keygen
 3. `dropbear -s -r /data/dropbear_rsa_host_key` → SSH 仅密钥认证；**禁用 `-B`**（空密码）与密码登录
 4. `authorized_keys` 放 `/etc/dropbear/authorized_keys`（运行期有效，persist.sh 每次恢复）
-5. 收尾：`pgrep -x inetd` 逐个 kill + `rm /etc/inetd.conf`——先实测 `ssh -i 私钥 root@ip id` 返回 `uid=0` 再执行（banner 可达不算验证通过）
+5. 收尾：`pidof inetd` 逐个 kill + `rm /etc/inetd.conf`——先实测 `ssh -i 私钥 root@ip id` 返回 `uid=0` 再执行（banner 可达不算验证通过）
 
 ## 其他未走通/未验证
 

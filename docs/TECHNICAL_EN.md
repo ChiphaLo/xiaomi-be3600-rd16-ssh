@@ -21,6 +21,7 @@ POST /cgi-bin/luci/;stok=$TOK/api/xqsmarthome/request_smartcontroller
                      "payload":"{\"command\":\"wan_block\",\"mac\":\"AA\n<CMD>\n\"}"}]}
     -> daemon stores the scene, returns id
 POST same endpoint {"command":"scene_start","id":<id>} -> executes
+POST same endpoint {"command":"scene_delete","id":<id>} -> removes the scene (required: scene_setting persists a record into /etc/smartcontroller/SmartTask.sc on the ~6 MB sec_cfg partition; repeated runs fill it. Wipe everything with reset_scenes)
 ```
 
 `payload` is a **string-typed** inner JSON object (double-escaped). The login body is form-encoded field by field so `&` / `+` in the password survive.
@@ -70,7 +71,7 @@ Dedicated chain `RD16_SSH` with a **windowless swap**: the full ruleset is built
 2. `dropbearkey -y -f /data/dropbear_rsa_host_key` validates the existing key; on corruption `rm` it first, then `dropbearkey -t rsa -f` rebuilds (~1 min — RSA-2048 is slow on this SoC) — a stale file otherwise blocks keygen
 3. `dropbear -s -r /data/dropbear_rsa_host_key` → key auth only; **no `-B`** (blank passwords) and no password logins
 4. `authorized_keys` lives at `/etc/dropbear/authorized_keys` (runtime-effective; persist.sh restores it)
-5. Cleanup: `kill` every `pgrep -x inetd` pid + `rm /etc/inetd.conf` — only after `ssh -i <key> root@<ip> id` returns `uid=0` (a banner alone is not verification)
+5. Cleanup: `kill` every `pidof inetd` pid + `rm /etc/inetd.conf` — only after `ssh -i <key> root@<ip> id` returns `uid=0` (a banner alone is not verification)
 
 ## Dead ends / unverified
 

